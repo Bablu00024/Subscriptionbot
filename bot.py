@@ -3,12 +3,12 @@ import warnings
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters, PTBUserWarning
+    ContextTypes, ConversationHandler, filters
 )
 from pymongo import MongoClient
 
-# --- Suppress PTBUserWarning in logs ---
-warnings.filterwarnings("ignore", category=PTBUserWarning)
+# --- Suppress PTB warnings globally ---
+warnings.filterwarnings("ignore", message=".*PTBUserWarning.*")
 
 # --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -122,8 +122,8 @@ def main():
             ADD_ANOTHER: [CallbackQueryHandler(add_another)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,      # ✅ correct mode
-        per_message=False   # ✅ avoids warnings
+        per_chat=True,
+        per_message=False
     )
 
     app.add_handler(conv_handler)
