@@ -113,7 +113,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [
             [InlineKeyboardButton(
                 f"{p['name']} - ₹{p['price']} ({p['days']} days)",
-                callback_data=f"plan_{channel_name}_{p['name']}"
+                callback_data=f"plan|{channel_name}|{p['name']}"   # ✅ use | delimiter
             )]
             for p in channel.get("plans", [])
         ]
@@ -133,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, channel_name, plan_name = query.data.split("_")
+    _, channel_name, plan_name = query.data.split("|")   # ✅ parse with | delimiter
     channel = channels.find_one({"name": channel_name})
     plan = next((p for p in channel["plans"] if p["name"] == plan_name), None)
 
@@ -166,7 +166,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan_"))
+    app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan"))
 
     app.run_polling()
 
