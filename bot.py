@@ -31,7 +31,7 @@ async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
         "channel_id": channel_id,
         "admin_ids": [user_id],
         "plans": [],
-        "upi_id": "your-upi@bank"
+        "upi_id": "paytm.s1cxqko@pty"
     })
 
     context.user_data["channel_id"] = channel_id
