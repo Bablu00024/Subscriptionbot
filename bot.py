@@ -110,7 +110,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.FORWARDED & filters.ChatType.CHANNEL, forward_add_channel)],
+        entry_points=[MessageHandler(filters.FORWARDED, forward_add_channel)],  # ✅ fixed
         states={
             PLAN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_name)],
             PLAN_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_price)],
