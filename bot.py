@@ -1,4 +1,5 @@
 import os
+import qrcode
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -11,6 +12,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client["subscription_bot"]
 channels = db["channels"]
+payments = db["payments"]
 
 # Conversation states
 PLAN_NAME, PLAN_PRICE, PLAN_DAYS, ADD_ANOTHER = range(4)
@@ -31,7 +33,7 @@ async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
         "channel_id": channel_id,
         "admin_ids": [user_id],
         "plans": [],
-        "upi_id": "paytm.s1cxqko@pty"
+        "upi_id": "your-upi@bank"   # default placeholder
     })
 
     context.user_data["channel_id"] = channel_id
@@ -116,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [
             [InlineKeyboardButton(
                 f"{p['name']} - ₹{p['price']} ({p['days']} days)",
-                callback_data=f"plan|{channel_id}|{p['name']}"   # ✅ use channel_id
+                callback_data=f"plan|{channel_id}|{p['name']}"
             )]
             for p in channel.get("plans", [])
         ]
@@ -132,7 +134,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("👋 Forward a message from your channel to begin setup.")
 
-# --- Plan selected ---
+# --- Plan selected (with payment) ---
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -145,11 +147,50 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Plan not found.")
         return
 
-    await query.message.reply_text(
-        f"You selected {plan['name']} for {channel['name']}.\n"
-        f"Price: ₹{plan['price']}, Duration: {plan['days']} days.\n\n"
-        f"(Here you can add payment instructions or QR code.)"
+    upi_id = channel.get("upi_id", "your-upi@bank")
+    amount = plan["price"]
+
+    # Generate QR code for UPI payment
+    qr = qrcode.make(f"upi://pay?pa={upi_id}&am={amount}&cu=INR")
+    qr.save("payment_qr.png")
+
+    # Save payment record
+    payments.insert_one({
+        "user_id": query.from_user.id,
+        "channel_id": channel_id,
+        "plan_name": plan_name,
+        "amount": amount,
+        "status": "pending"
+    })
+
+    buttons = [[InlineKeyboardButton("✅ I have paid", callback_data=f"paid|{channel_id}|{query.from_user.id}")]]
+    await query.message.reply_photo(
+        photo=open("payment_qr.png", "rb"),
+        caption=f"Pay ₹{amount} to {upi_id}\nAfter payment, click 'I have paid'.",
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
+
+# --- Set UPI command ---
+async def set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /set_upi <channel_id> <upi_id>")
+        return
+
+    channel_id = int(context.args[0])
+    upi_id = context.args[1]
+
+    channel = channels.find_one({"channel_id": channel_id})
+    if not channel:
+        await update.message.reply_text("❌ Channel not found.")
+        return
+
+    if user_id not in channel["admin_ids"]:
+        await update.message.reply_text("❌ You are not authorized to update this channel.")
+        return
+
+    channels.update_one({"channel_id": channel_id}, {"$set": {"upi_id": upi_id}})
+    await update.message.reply_text(f"✅ UPI ID updated to {upi_id} for channel {channel['name']}.")
 
 # --- Main ---
 def main():
@@ -171,6 +212,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan"))
+    app.add_handler(CommandHandler("set_upi", set_upi))
 
     app.run_polling()
 
