@@ -1,35 +1,37 @@
 import os
-import warnings
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 from pymongo import MongoClient
-
-# --- Suppress PTB warnings globally ---
-warnings.filterwarnings("ignore", message=".*PTBUserWarning.*")
+import qrcode
 
 # --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client["subscription_bot"]
 channels = db["channels"]
+subs = db["subscribers"]
+payments = db["payments"]
 
-# Conversation states
-PLAN_NAME, PLAN_PRICE, PLAN_DAYS, ADD_ANOTHER = range(4)
+# --- Utility: check admin ---
+def is_channel_admin(channel_name: str, user_id: int) -> bool:
+    channel = channels.find_one({"name": channel_name})
+    if not channel:
+        return False
+    return user_id in channel["admin_ids"]
 
-# --- Forward channel message to add channel ---
-async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    fwd_chat = update.message.forward_from_chat
-    if not fwd_chat or fwd_chat.type != "channel":
-        await update.message.reply_text("❌ Please forward a message from the channel you want to add.")
-        return ConversationHandler.END
-
-    channel_name = fwd_chat.title
-    channel_id = fwd_chat.id
+# --- Add channel ---
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /add_channel <channel_name> <channel_id>")
+        return
 
+    channel_name = " ".join(context.args[:-1])
+    channel_id = int(context.args[-1])
+
+    # Only allow the user who creates the channel to be its first admin
     channels.insert_one({
         "name": channel_name,
         "channel_id": channel_id,
@@ -37,96 +39,146 @@ async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
         "plans": [],
         "upi_id": "your-upi@bank"
     })
+    await update.message.reply_text(f"✅ Channel '{channel_name}' added. You are the admin.")
 
-    context.user_data["channel_name"] = channel_name
-    context.user_data["plans"] = []  # keep track of plans in this conversation
-    await update.message.reply_text(f"✅ Channel '{channel_name}' added.\n\nEnter the first plan name:")
-    return PLAN_NAME
+# --- Add admin ---
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /add_admin <channel_name> <new_admin_id>")
+        return
 
-# --- Ask plan name ---
-async def ask_plan_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["plan_name"] = update.message.text
-    await update.message.reply_text("Enter the plan price (₹):")
-    return PLAN_PRICE
+    channel_name = " ".join(context.args[:-1])
+    new_admin_id = int(context.args[-1])
 
-# --- Ask plan price ---
-async def ask_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["plan_price"] = int(update.message.text)
-    await update.message.reply_text("Enter the plan duration (days):")
-    return PLAN_DAYS
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to add admins for this channel.")
+        return
 
-# --- Ask plan days and save plan ---
-async def ask_plan_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    channel_name = context.user_data["channel_name"]
-    plan_name = context.user_data["plan_name"]
-    price = context.user_data["plan_price"]
-    days = int(update.message.text)
+    channels.update_one(
+        {"name": channel_name},
+        {"$addToSet": {"admin_ids": new_admin_id}}
+    )
+    await update.message.reply_text(f"✅ User {new_admin_id} added as admin for {channel_name}.")
 
-    # Save to DB
+# --- Remove admin ---
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /remove_admin <channel_name> <admin_id>")
+        return
+
+    channel_name = " ".join(context.args[:-1])
+    admin_id = int(context.args[-1])
+
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to remove admins for this channel.")
+        return
+
+    channels.update_one(
+        {"name": channel_name},
+        {"$pull": {"admin_ids": admin_id}}
+    )
+    await update.message.reply_text(f"✅ User {admin_id} removed as admin for {channel_name}.")
+
+# --- Set plan ---
+async def set_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 4:
+        await update.message.reply_text("Usage: /set_plan <channel_name> <plan_name> <price> <days>")
+        return
+
+    channel_name = " ".join(context.args[:-3])
+    plan_name = context.args[-3]
+    price = int(context.args[-2])
+    days = int(context.args[-1])
+
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to set plans for this channel.")
+        return
+
     channels.update_one(
         {"name": channel_name},
         {"$push": {"plans": {"name": plan_name, "price": price, "days": days}}}
     )
+    await update.message.reply_text(f"✅ Plan '{plan_name}' added for {channel_name}.")
 
-    # Save to conversation memory
-    context.user_data["plans"].append({"name": plan_name, "price": price, "days": days})
+# --- Start ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        channel_name = context.args[0]
+        channel = channels.find_one({"name": channel_name})
+        if not channel:
+            await update.message.reply_text("Channel not found.")
+            return
+        buttons = [[InlineKeyboardButton(f"{p['name']} - ₹{p['price']} ({p['days']} days)", callback_data=f"plan_{channel_name}_{p['name']}")] for p in channel["plans"]]
+        await update.message.reply_text(f"Choose a plan for {channel_name}:", reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text("Welcome! Use /add_channel or /set_plan if you're an admin.")
 
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Another Plan", callback_data="add_more")],
-        [InlineKeyboardButton("✅ Finish Setup", callback_data="finish_setup")]
-    ]
-    await update.message.reply_text(
-        f"✅ Plan '{plan_name}' added for {channel_name}.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return ADD_ANOTHER
-
-# --- Handle buttons ---
-async def add_another(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Plan selected ---
+async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "add_more":
-        await query.message.reply_text("Enter the next plan name:")
-        return PLAN_NAME
-    elif query.data == "finish_setup":
-        channel_name = context.user_data["channel_name"]
-        bot_username = (await context.bot.get_me()).username
-        start_link = f"https://t.me/{bot_username}?start={channel_name}"
+    _, channel_name, plan_name = query.data.split("_")
+    channel = channels.find_one({"name": channel_name})
+    plan = next(p for p in channel["plans"] if p["name"] == plan_name)
+    upi_id = channel.get("upi_id", "your-upi@bank")
+    amount = plan["price"]
 
-        # Build summary of all plans
-        plans = context.user_data.get("plans", [])
-        summary = "\n".join([f"- {p['name']}: ₹{p['price']} ({p['days']} days)" for p in plans])
+    qr = qrcode.make(f"upi://pay?pa={upi_id}&am={amount}&cu=INR")
+    qr.save("payment_qr.png")
 
-        await query.message.reply_text(
-            f"🎉 Setup complete for {channel_name}!\n\n"
-            f"📋 Plans configured:\n{summary}\n\n"
-            f"🔗 Share this link with users:\n{start_link}"
-        )
-        return ConversationHandler.END
+    payments.insert_one({"user_id": query.from_user.id, "channel_name": channel_name, "plan_name": plan_name, "amount": amount, "status": "pending"})
+    buttons = [[InlineKeyboardButton("I have paid", callback_data=f"paid_{channel_name}_{query.from_user.id}")]]
+    await query.message.reply_photo(photo=open("payment_qr.png", "rb"), caption=f"Pay ₹{amount} to {upi_id}\nAfter payment, click 'I have paid'.", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- Cancel ---
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Setup cancelled.")
-    return ConversationHandler.END
+# --- Expiry cleanup ---
+def remove_expired_subs(app):
+    now = datetime.utcnow()
+    expired = subs.find({"valid_until": {"$lt": now}, "status": "active"})
+    for user in expired:
+        channel = channels.find_one({"name": user["channel_name"]})
+        try:
+            app.bot.ban_chat_member(chat_id=channel["channel_id"], user_id=user["user_id"])
+            app.bot.unban_chat_member(chat_id=channel["channel_id"], user_id=user["user_id"])
+            subs.update_one({"_id": user["_id"]}, {"$set": {"status": "expired"}})
+            app.bot.send_message(chat_id=user["user_id"], text=f"⚠️ Your subscription to {channel['name']} has expired.")
+        except Exception as e:
+            print(f"Failed to remove {user['user_id']}: {e}")
+
+# --- Reminder job ---
+def send_expiry_reminders(app):
+    now = datetime.utcnow()
+    tomorrow = now + timedelta(days=1)
+    expiring = subs.find({"valid_until": {"$lte": tomorrow, "$gte": now}, "status": "active"})
+    for user in expiring:
+        channel = channels.find_one({"name": user["channel_name"]})
+        try:
+            buttons = [[InlineKeyboardButton("🔄 Renew Now", callback_data=f"renew_{user['channel_name']}_{user['user_id']}")]]
+            app.bot.send_message(
+                chat_id=user["user_id"],
+                text=f"⚠️ Your subscription to {channel['name']} will expire on {user['valid_until'].date()}.\nClick below to renew.",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        except Exception as e:
+            print(f"Reminder failed: {e}")
 
 # --- Main ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("add_channel", add_channel))
+    app.add_handler(CommandHandler("add_admin", add_admin))
+    app.add_handler(CommandHandler("remove_admin", remove_admin))
+    app.add_handler(CommandHandler("set_plan", set_plan))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan_"))
 
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.FORWARDED & filters.ChatType.CHANNEL, forward_add_channel)],
-        states={
-            PLAN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_name)],
-            PLAN_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_price)],
-            PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_days)],
-            ADD_ANOTHER: [CallbackQueryHandler(add_another)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,
-        per_message=False
-    )
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: remove_expired_subs(app), "interval", hours=1)
+    scheduler.add_job(lambda: send_expiry_reminders(app), "interval", hours=24)
+    scheduler.start()
 
-    app.add_handler(conv_handler)
     app.run_polling()
 
 if __name__ == "__main__":
