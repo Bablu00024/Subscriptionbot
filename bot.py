@@ -170,51 +170,61 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# --- Set UPI command ---
-async def set_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /set_upi <channel_id> <upi_id>")
-        return
-
-    channel_id = int(context.args[0])
-    upi_id = context.args[1]
+# --- Payment confirmed ---
+async def payment_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, channel_id, user_id = query.data.split("|")
+    channel_id = int(channel_id)
+    user_id = int(user_id)
 
     channel = channels.find_one({"channel_id": channel_id})
     if not channel:
-        await update.message.reply_text("❌ Channel not found.")
+        await query.message.reply_text("❌ Channel not found.")
         return
 
-    if user_id not in channel["admin_ids"]:
-        await update.message.reply_text("❌ You are not authorized to update this channel.")
-        return
-
-    channels.update_one({"channel_id": channel_id}, {"$set": {"upi_id": upi_id}})
-    await update.message.reply_text(f"✅ UPI ID updated to {upi_id} for channel {channel['name']}.")
-
-# --- Main ---
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.FORWARDED, forward_add_channel)],
-        states={
-            PLAN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_name)],
-            PLAN_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_price)],
-            PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_days)],
-            ADD_ANOTHER: [CallbackQueryHandler(add_another)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=True,
-        per_message=False
+    payments.update_one(
+        {"user_id": user_id, "channel_id": channel_id, "status": "pending"},
+        {"$set": {"status": "awaiting_approval"}}
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan"))
-    app.add_handler(CommandHandler("set_upi", set_upi))
+    # Notify admins
+    for admin_id in channel["admin_ids"]:
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve|{channel_id}|{user_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject|{channel_id}|{user_id}")
+            ]
+        ]
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=f"💳 Payment confirmation received for {channel['name']}.\n"
+                 f"User ID: {user_id}\nPlan: awaiting approval.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
-    app.run_polling()
+    await query.message.reply_text("✅ Payment submitted. Waiting for admin approval.")
 
-if __name__ == "__main__":
-    main()
+# --- Approve payment ---
+async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, channel_id, user_id = query.data.split("|")
+    channel_id = int(channel_id)
+    user_id = int(user_id)
+
+    channel = channels.find_one({"channel_id": channel_id})
+    payments.update_one(
+        {"user_id": user_id, "channel_id": channel_id},
+        {"$set": {"status": "approved"}}
+    )
+
+    await context.bot.send_message(user_id, f"🎉 Your payment for {channel['name']} has been approved! You now have access.")
+    await query.message.reply_text("✅ Approved.")
+
+# --- Reject payment ---
+async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, channel_id, user_id = query.data.split("|")
+    channel_id
