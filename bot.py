@@ -34,6 +34,7 @@ async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
         "upi_id": "your-upi@bank"
     })
 
+    context.user_data["channel_id"] = channel_id
     context.user_data["channel_name"] = channel_name
     context.user_data["plans"] = []
     await update.message.reply_text(f"✅ Channel '{channel_name}' added.\n\nEnter the first plan name:")
@@ -53,13 +54,14 @@ async def ask_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Ask plan days and save plan ---
 async def ask_plan_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = context.user_data["channel_id"]
     channel_name = context.user_data["channel_name"]
     plan_name = context.user_data["plan_name"]
     price = context.user_data["plan_price"]
     days = int(update.message.text)
 
     channels.update_one(
-        {"name": channel_name},
+        {"channel_id": channel_id},
         {"$push": {"plans": {"name": plan_name, "price": price, "days": days}}}
     )
     context.user_data["plans"].append({"name": plan_name, "price": price, "days": days})
@@ -82,9 +84,10 @@ async def add_another(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Enter the next plan name:")
         return PLAN_NAME
     elif query.data == "finish_setup":
+        channel_id = context.user_data["channel_id"]
         channel_name = context.user_data["channel_name"]
         bot_username = (await context.bot.get_me()).username
-        start_link = f"https://t.me/{bot_username}?start={channel_name}"
+        start_link = f"https://t.me/{bot_username}?start={channel_id}"
 
         plans = context.user_data.get("plans", [])
         summary = "\n".join([f"- {p['name']}: ₹{p['price']} ({p['days']} days)" for p in plans])
@@ -104,8 +107,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Start command (for users clicking the link) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
-        channel_name = context.args[0]
-        channel = channels.find_one({"name": channel_name})
+        channel_id = int(context.args[0])
+        channel = channels.find_one({"channel_id": channel_id})
         if not channel:
             await update.message.reply_text("❌ Channel not found.")
             return
@@ -113,17 +116,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [
             [InlineKeyboardButton(
                 f"{p['name']} - ₹{p['price']} ({p['days']} days)",
-                callback_data=f"plan|{channel_name}|{p['name']}"   # ✅ use | delimiter
+                callback_data=f"plan|{channel_id}|{p['name']}"   # ✅ use channel_id
             )]
             for p in channel.get("plans", [])
         ]
 
         if not buttons:
-            await update.message.reply_text(f"No plans configured yet for {channel_name}.")
+            await update.message.reply_text(f"No plans configured yet for {channel['name']}.")
             return
 
         await update.message.reply_text(
-            f"Choose a plan for {channel_name}:",
+            f"Choose a plan for {channel['name']}:",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     else:
@@ -133,8 +136,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, channel_name, plan_name = query.data.split("|")   # ✅ parse with | delimiter
-    channel = channels.find_one({"name": channel_name})
+    _, channel_id, plan_name = query.data.split("|")
+    channel_id = int(channel_id)
+    channel = channels.find_one({"channel_id": channel_id})
     plan = next((p for p in channel["plans"] if p["name"] == plan_name), None)
 
     if not plan:
@@ -142,7 +146,7 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.message.reply_text(
-        f"You selected {plan['name']} for {channel_name}.\n"
+        f"You selected {plan['name']} for {channel['name']}.\n"
         f"Price: ₹{plan['price']}, Duration: {plan['days']} days.\n\n"
         f"(Here you can add payment instructions or QR code.)"
     )
