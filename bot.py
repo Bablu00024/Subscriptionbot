@@ -101,16 +101,58 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Setup cancelled.")
     return ConversationHandler.END
 
-# --- Start command (for testing) ---
+# --- Start command (for users clicking the link) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Forward a message from your channel to begin setup.")
+    if context.args:
+        channel_name = context.args[0]
+        channel = channels.find_one({"name": channel_name})
+        if not channel:
+            await update.message.reply_text("❌ Channel not found.")
+            return
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{p['name']} - ₹{p['price']} ({p['days']} days)",
+                callback_data=f"plan_{channel_name}_{p['name']}"
+            )]
+            for p in channel.get("plans", [])
+        ]
+
+        if not buttons:
+            await update.message.reply_text(f"No plans configured yet for {channel_name}.")
+            return
+
+        await update.message.reply_text(
+            f"Choose a plan for {channel_name}:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    else:
+        await update.message.reply_text("👋 Forward a message from your channel to begin setup.")
+
+# --- Plan selected ---
+async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, channel_name, plan_name = query.data.split("_")
+    channel = channels.find_one({"name": channel_name})
+    plan = next((p for p in channel["plans"] if p["name"] == plan_name), None)
+
+    if not plan:
+        await query.message.reply_text("❌ Plan not found.")
+        return
+
+    await query.message.reply_text(
+        f"You selected {plan['name']} for {channel_name}.\n"
+        f"Price: ₹{plan['price']}, Duration: {plan['days']} days.\n\n"
+        f"(Here you can add payment instructions or QR code.)"
+    )
 
 # --- Main ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.FORWARDED, forward_add_channel)],  # ✅ fixed
+        entry_points=[MessageHandler(filters.FORWARDED, forward_add_channel)],
         states={
             PLAN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_name)],
             PLAN_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_price)],
@@ -124,6 +166,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan_"))
+
     app.run_polling()
 
 if __name__ == "__main__":
