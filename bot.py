@@ -1,11 +1,12 @@
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from pymongo import MongoClient
 import qrcode
 
+# --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client["subscription_bot"]
@@ -13,33 +14,96 @@ channels = db["channels"]
 subs = db["subscribers"]
 payments = db["payments"]
 
-# Add channel
+# --- Utility: check admin ---
+def is_channel_admin(channel_name: str, user_id: int) -> bool:
+    channel = channels.find_one({"name": channel_name})
+    if not channel:
+        return False
+    return user_id in channel["admin_ids"]
+
+# --- Add channel ---
 async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /add_channel <channel_name> <channel_id>")
         return
-    channel_name = context.args[0]
-    channel_id = int(context.args[1])
-    admin_id = update.effective_user.id
+
+    channel_name = " ".join(context.args[:-1])
+    channel_id = int(context.args[-1])
+
+    # Only allow the user who creates the channel to be its first admin
     channels.insert_one({
         "name": channel_name,
         "channel_id": channel_id,
-        "admin_ids": [admin_id],
+        "admin_ids": [user_id],
         "plans": [],
         "upi_id": "your-upi@bank"
     })
-    await update.message.reply_text(f"Channel '{channel_name}' added. Use /set_plan to add plans.")
+    await update.message.reply_text(f"✅ Channel '{channel_name}' added. You are the admin.")
 
-# Set plan
+# --- Add admin ---
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /add_admin <channel_name> <new_admin_id>")
+        return
+
+    channel_name = " ".join(context.args[:-1])
+    new_admin_id = int(context.args[-1])
+
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to add admins for this channel.")
+        return
+
+    channels.update_one(
+        {"name": channel_name},
+        {"$addToSet": {"admin_ids": new_admin_id}}
+    )
+    await update.message.reply_text(f"✅ User {new_admin_id} added as admin for {channel_name}.")
+
+# --- Remove admin ---
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /remove_admin <channel_name> <admin_id>")
+        return
+
+    channel_name = " ".join(context.args[:-1])
+    admin_id = int(context.args[-1])
+
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to remove admins for this channel.")
+        return
+
+    channels.update_one(
+        {"name": channel_name},
+        {"$pull": {"admin_ids": admin_id}}
+    )
+    await update.message.reply_text(f"✅ User {admin_id} removed as admin for {channel_name}.")
+
+# --- Set plan ---
 async def set_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if len(context.args) < 4:
         await update.message.reply_text("Usage: /set_plan <channel_name> <plan_name> <price> <days>")
         return
-    channel_name, plan_name, price, days = context.args[0], context.args[1], int(context.args[2]), int(context.args[3])
-    channels.update_one({"name": channel_name}, {"$push": {"plans": {"name": plan_name, "price": price, "days": days}}})
+
+    channel_name = " ".join(context.args[:-3])
+    plan_name = context.args[-3]
+    price = int(context.args[-2])
+    days = int(context.args[-1])
+
+    if not is_channel_admin(channel_name, user_id):
+        await update.message.reply_text("❌ You are not authorized to set plans for this channel.")
+        return
+
+    channels.update_one(
+        {"name": channel_name},
+        {"$push": {"plans": {"name": plan_name, "price": price, "days": days}}}
+    )
     await update.message.reply_text(f"✅ Plan '{plan_name}' added for {channel_name}.")
 
-# Start
+# --- Start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         channel_name = context.args[0]
@@ -52,7 +116,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Welcome! Use /add_channel or /set_plan if you're an admin.")
 
-# Plan selected
+# --- Plan selected ---
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -69,7 +133,7 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [[InlineKeyboardButton("I have paid", callback_data=f"paid_{channel_name}_{query.from_user.id}")]]
     await query.message.reply_photo(photo=open("payment_qr.png", "rb"), caption=f"Pay ₹{amount} to {upi_id}\nAfter payment, click 'I have paid'.", reply_markup=InlineKeyboardMarkup(buttons))
 
-# Expiry cleanup
+# --- Expiry cleanup ---
 def remove_expired_subs(app):
     now = datetime.utcnow()
     expired = subs.find({"valid_until": {"$lt": now}, "status": "active"})
@@ -83,7 +147,7 @@ def remove_expired_subs(app):
         except Exception as e:
             print(f"Failed to remove {user['user_id']}: {e}")
 
-# Reminder job
+# --- Reminder job ---
 def send_expiry_reminders(app):
     now = datetime.utcnow()
     tomorrow = now + timedelta(days=1)
@@ -100,9 +164,12 @@ def send_expiry_reminders(app):
         except Exception as e:
             print(f"Reminder failed: {e}")
 
+# --- Main ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("add_channel", add_channel))
+    app.add_handler(CommandHandler("add_admin", add_admin))
+    app.add_handler(CommandHandler("remove_admin", remove_admin))
     app.add_handler(CommandHandler("set_plan", set_plan))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(plan_selected, pattern="^plan_"))
