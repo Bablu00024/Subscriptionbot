@@ -1,10 +1,14 @@
 import os
+import warnings
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters
+    ContextTypes, ConversationHandler, filters, PTBUserWarning
 )
 from pymongo import MongoClient
+
+# --- Suppress PTBUserWarning in logs ---
+warnings.filterwarnings("ignore", category=PTBUserWarning)
 
 # --- Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -117,8 +121,9 @@ def main():
             PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_days)],
             ADD_ANOTHER: [CallbackQueryHandler(add_another)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
-        # 👈 per_message removed, no warning now
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_chat=True,      # ✅ correct mode
+        per_message=False   # ✅ avoids warnings
     )
 
     app.add_handler(conv_handler)
