@@ -117,8 +117,8 @@ def main():
             PLAN_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_plan_days)],
             ADD_ANOTHER: [CallbackQueryHandler(add_another)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=True  # avoids PTBUserWarning
+        fallbacks=[CommandHandler("cancel", cancel)]
+        # 👈 per_message removed, no warning now
     )
 
     app.add_handler(conv_handler)
