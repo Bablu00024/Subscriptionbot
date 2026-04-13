@@ -35,6 +35,7 @@ async def forward_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE
     })
 
     context.user_data["channel_name"] = channel_name
+    context.user_data["plans"] = []  # keep track of plans in this conversation
     await update.message.reply_text(f"✅ Channel '{channel_name}' added.\n\nEnter the first plan name:")
     return PLAN_NAME
 
@@ -57,10 +58,14 @@ async def ask_plan_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = context.user_data["plan_price"]
     days = int(update.message.text)
 
+    # Save to DB
     channels.update_one(
         {"name": channel_name},
         {"$push": {"plans": {"name": plan_name, "price": price, "days": days}}}
     )
+
+    # Save to conversation memory
+    context.user_data["plans"].append({"name": plan_name, "price": price, "days": days})
 
     keyboard = [
         [InlineKeyboardButton("➕ Add Another Plan", callback_data="add_more")],
@@ -83,8 +88,15 @@ async def add_another(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_name = context.user_data["channel_name"]
         bot_username = (await context.bot.get_me()).username
         start_link = f"https://t.me/{bot_username}?start={channel_name}"
+
+        # Build summary of all plans
+        plans = context.user_data.get("plans", [])
+        summary = "\n".join([f"- {p['name']}: ₹{p['price']} ({p['days']} days)" for p in plans])
+
         await query.message.reply_text(
-            f"🎉 Setup complete!\n\n🔗 Share this link with users:\n{start_link}"
+            f"🎉 Setup complete for {channel_name}!\n\n"
+            f"📋 Plans configured:\n{summary}\n\n"
+            f"🔗 Share this link with users:\n{start_link}"
         )
         return ConversationHandler.END
 
@@ -106,6 +118,7 @@ def main():
             ADD_ANOTHER: [CallbackQueryHandler(add_another)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=True  # avoids PTBUserWarning
     )
 
     app.add_handler(conv_handler)
