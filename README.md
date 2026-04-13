@@ -12,12 +12,4 @@ A scalable Telegram bot for managing paid subscriptions to private channels.
 ## Setup
 1. Clone the repo
 2. Install dependencies: `pip install -r requirements.txt`
-3. Set environment variables:
-   - `BOT_TOKEN` = your Telegram bot token
-   - `MONGO_URI` = your MongoDB Atlas URI
-4. Run locally: `python bot.py`
-
-## Deploy to Heroku
-- Add a Procfile with `worker: python bot.py`
-- Push to Heroku: `git push heroku main`
-- Set config vars:
+3. Create `.env` file with:
